@@ -49,6 +49,42 @@
     return worker;
   }
 
+  /* ---------- 날짜 보정 ---------- */
+  // 영어 OCR 은 「년/월/일」 을 숫자 옆의 잡음 글자(9, 2, ¥ 등)로 읽는다.
+  //   예) "20269 112 18¥"  →  2026 / 11 / 18
+  // 잡음이 붙은 토큰은 숫자만 남기고, 숫자만 있는 3자리 토큰은 마지막 글자를 잡음으로 보고 뗀다.
+  function parseDate(text) {
+    const m = text.match(/(20\d{2})\S?\s+(\d\S{0,2})\s+(\d\S{0,2})/);
+    if (!m) return '';
+    const pick = (tok, max) => {
+      const digits = tok.match(/^\d+/)[0];
+      const noisy = tok.length > digits.length;
+      let cands = [];
+      if (noisy) cands = [digits];
+      else if (digits.length >= 3) cands = [digits.slice(0, -1)];
+      else cands = [digits, digits.slice(0, 1)];
+      for (const c of cands) { const n = +c; if (n >= 1 && n <= max) return n; }
+      return 0;
+    };
+    const y = +m[1], mo = pick(m[2], 12), d = pick(m[3], 31);
+    if (!mo || !d) return '';
+    const dt = new Date(y, mo - 1, d);
+    if (dt.getMonth() !== mo - 1) return '';     // 2월 30일 같은 잘못된 날짜 거르기
+    return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+  }
+
+  const WEATHER = {
+    sunny: ['☀️', '맑음'], partly: ['🌤️', '구름 조금'], cloudy: ['☁️', '흐림'],
+    rain: ['🌧️', '비'], snow: ['❄️', '눈'], fog: ['🌫️', '안개'], wind: ['💨', '바람']
+  };
+  const DAYS = ['일', '월', '화', '수', '목', '금', '토'];
+  function dateLabel(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+    if (!m) return '';
+    const dt = new Date(+m[1], +m[2] - 1, +m[3]);
+    return `${m[1]}.${m[2]}.${m[3]} (${DAYS[dt.getDay()]})`;
+  }
+
   /* ---------- OCR 결과에서 값 뽑기 ---------- */
   function parseResult(data) {
     const lines = [];
@@ -72,7 +108,14 @@
     const T = dedupe(times).sort(byPos), K = dedupe(kcals).sort(byPos), D = dedupe(dists).sort(byPos);
 
     // 운동 시간: 첫 번째(왼쪽 위) 시간 값 / 활동 칼로리: 가장 위쪽 kcal / 거리: 첫 번째 km
-    return { time: T[0]?.v || '', kcal: K[0]?.v || '', dist: D[0]?.v || '', raw: { T, K, D } };
+    // 시간대·날짜: 「2026년 11월 18일 16:53 ~ 17:23」 줄에서 뽑는다 (한글은 못 읽어서 숫자 뒤에 잡음 글자가 붙는다)
+    let range = '', date = '';
+    for (const l of lines.slice().sort(byPos)) {
+      const rm = l.text.match(/(\d{1,2})\s*:\s*([0-5]\d)\s*[~∼\-–—]\s*(\d{1,2})\s*:\s*([0-5]\d)/);
+      if (rm && !range) { range = `${+rm[1]}:${rm[2]} ~ ${+rm[3]}:${rm[4]}`; }
+      if (!date) date = parseDate(l.text);
+    }
+    return { time: T[0]?.v || '', kcal: K[0]?.v || '', dist: D[0]?.v || '', range, date, raw: { T, K, D } };
   }
 
   async function runOcr(img) {
@@ -93,9 +136,10 @@
       status('글자 엔진 준비 중… (처음에는 몇 초 걸려요)');
       const r = await runOcr(img);
       $('vTime').value = r.time; $('vKcal').value = r.kcal; $('vDist').value = r.dist;
+      $('vRange').value = r.range; $('vDate').value = r.date;
       const miss = [!r.time && '시간', !r.kcal && '칼로리'].filter(Boolean);
       if (miss.length) status(`${miss.join('·')}을(를) 못 읽었어요. 직접 입력해주세요.`, true);
-      else status('완료! 값이 맞는지 확인하세요.');
+      else status(r.date ? '완료! 값이 맞는지 확인하세요. (날짜는 한글 때문에 틀릴 수 있어요)' : '완료! 날짜는 못 읽었어요. 직접 골라주세요.');
       draw();
     } catch (err) {
       console.error(err);
@@ -140,13 +184,24 @@
     items.push({ label: 'TIME', value: t || '–:––:––', unit: '' });
     items.push({ label: 'CALORIES', value: k || '–––', unit: 'KCAL' });
 
+    // 날짜 · 시간대 · 날씨 (비어 있는 항목은 건너뜀)
+    const metaParts = [];
+    const dl = dateLabel($('vDate').value); if (dl) metaParts.push(dl);
+    const rg = $('vRange').value.trim().replace(/\s*[~∼\-–—]\s*/, ' ~ '); if (rg) metaParts.push(rg);
+    const wx = WEATHER[$('vWx').value], tp = $('vTemp').value.replace(/[^\d.\-]/g, '');
+    const wxText = [wx ? `${wx[0]} ${wx[1]}` : '', tp ? `${tp}°C` : ''].filter(Boolean).join(' ');
+    if (wxText) metaParts.push(wxText);
+    const meta = metaParts.join('  ·  ');
+
     // 글씨 크기: 슬라이더 비율 적용. 항목이 많아 카드를 넘칠 땐 자동으로 줄여서 맞춘다.
     const fk = +$('fsize').value / 100;
     const layout = f => {
       const big = Math.round(W * 0.2 * f), lab = Math.round(W * 0.04 * f), unitSz = Math.round(W * 0.075 * f);
       const gap = Math.round(W * 0.07 * f);
       const blockH = lab + 18 + big;           // 라벨 + 간격 + 숫자
-      return { big, lab, unitSz, gap, blockH, totalH: items.length * blockH + (items.length - 1) * gap };
+      const metaSz = meta ? Math.round(W * 0.043 * f) : 0;
+      const metaBlock = meta ? metaSz + Math.round(W * 0.06 * f) : 0;
+      return { big, lab, unitSz, gap, blockH, metaSz, metaBlock, totalH: metaBlock + items.length * blockH + (items.length - 1) * gap };
     };
     let L = layout(fk);
     if (L.totalH > H * 0.84) L = layout(fk * (H * 0.84) / L.totalH);
@@ -154,15 +209,29 @@
     ctx.font = `800 ${L.big}px ${FONT}`;
     const widest = Math.max(...items.map(it => ctx.measureText(it.value).width + (it.unit ? L.unitSz * 2.4 : 0)));
     if (widest > W * 0.92) L = layout((L.big / (W * 0.2)) * (W * 0.92) / widest);
-    const { big, lab, unitSz, gap, blockH, totalH } = L;
+    const { big, lab, unitSz, gap, blockH, metaBlock, totalH } = L;
+    let metaSz = L.metaSz;
+    if (meta) {                                   // 메타 줄이 너무 길면 그 줄만 줄여서 맞춘다
+      ctx.font = `600 ${metaSz}px ${FONT}`;
+      const mw = ctx.measureText(meta).width;
+      if (mw > W * 0.92) metaSz = Math.floor(metaSz * (W * 0.92) / mw);
+    }
     $('fsizeVal').textContent = Math.round(fk * 100) + '%';
     const pos = $('pos').value;
     let y0 = pos === 'top' ? H * 0.12 : pos === 'bottom' ? H - totalH - H * 0.1 : (H - totalH) / 2;
 
     ctx.textBaseline = 'alphabetic';
     const shadow = !!bgImg;
+    if (meta) {
+      ctx.save();
+      if (shadow) { ctx.shadowColor = 'rgba(0,0,0,.55)'; ctx.shadowBlur = 24; }
+      ctx.textAlign = 'center'; ctx.fillStyle = fg; ctx.globalAlpha = 0.9;
+      ctx.font = `600 ${metaSz}px ${FONT}`;
+      ctx.fillText(meta, W / 2, y0 + metaSz);
+      ctx.restore();
+    }
     items.forEach((it, i) => {
-      const y = y0 + i * (blockH + gap);
+      const y = y0 + metaBlock + i * (blockH + gap);
       ctx.save();
       if (shadow) { ctx.shadowColor = 'rgba(0,0,0,.55)'; ctx.shadowBlur = 24; }
       // 라벨
@@ -184,7 +253,7 @@
     });
   }
 
-  ['vTime', 'vKcal', 'vDist'].forEach(id => $(id).addEventListener('input', draw));
+  ['vTime', 'vKcal', 'vDist', 'vDate', 'vRange', 'vWx', 'vTemp'].forEach(id => $(id).addEventListener('input', draw));
   ['showDist', 'ratio', 'pos', 'cBg', 'cFg', 'cAcc', 'dim', 'fsize'].forEach(id => $(id).addEventListener('input', draw));
 
   /* ---------- 저장 / 공유 ---------- */

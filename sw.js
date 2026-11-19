@@ -1,6 +1,6 @@
 // 오프라인 지원: 모든 파일을 처음 열 때 캐시에 저장하고, 이후엔 캐시에서 바로 불러온다.
 // 앱 파일을 수정해서 다시 올릴 때는 아래 VERSION 숫자를 올려야 폰에 새 버전이 반영된다.
-const VERSION = 'running-card-v2';
+const VERSION = 'running-card-v3';
 const FILES = [
   './', './index.html', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png', './icons/apple-touch-icon.png',
